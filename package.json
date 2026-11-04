@@ -1,0 +1,31 @@
+{
+  "name": "deontic-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^20.14.0",
+    "@types/picomatch": "^4.0.0",
+    "fast-check": "^3.22.0",
+    "js-tiktoken": "^1.0.15",
+    "mdast-util-to-string": "^4.0.0",
+    "picomatch": "^4.0.2",
+    "remark-frontmatter": "^5.0.0",
+    "remark-parse": "^11.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.3",
+    "unified": "^11.0.5",
+    "vitest": "^2.1.4",
+    "yaml": "^2.6.0"
+  }
+}
