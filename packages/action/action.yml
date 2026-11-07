@@ -1,0 +1,22 @@
+name: 'Deontic'
+description: 'Deterministic Static Analyzer, Budget Profiler, Splitter, and Cross-Tool Syncer for AI Agent Harness Files'
+inputs:
+  command:
+    description: 'Deontic command to run (check or sync)'
+    required: false
+    default: 'check'
+  strict:
+    description: 'Fail on warnings as well as errors'
+    required: false
+    default: 'false'
+  format:
+    description: 'Output format (github, sarif, json, pretty)'
+    required: false
+    default: 'github'
+  working-directory:
+    description: 'Working directory to analyze'
+    required: false
+    default: '.'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
