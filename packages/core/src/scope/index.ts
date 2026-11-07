@@ -222,3 +222,137 @@ export function matchesGlobSet(candidatePath: string, globs: string[]): boolean 
   const matchesNegative = negativeGlobs.some((g) => picomatch.isMatch(posix, g, { dot: true }));
   return !matchesNegative;
 }
+
+const HARNESS_META_FILE_REGEX =
+  /(?:^|\/)(?:CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md|GEMINI\.md|\.cursorrules|\.windsurfrules|\.mcp\.json|mcp\.json|claude_desktop_config\.json|deontic\.json|package\.json|pnpm-lock\.yaml|tsconfig\.json|\.gitignore)$|^\.(?:claude|cursor|github|vscode)\//i;
+
+function extractStaticPrefix(glob: string): string {
+  const clean = toPosixPath(glob).replace(/^!+/, '').replace(/^\.\//, '');
+  const parts = clean.split('/');
+  const prefixParts: string[] = [];
+  for (const part of parts) {
+    if (part.includes('*') || part.includes('?') || part.includes('[') || part.includes('{')) {
+      break;
+    }
+    prefixParts.push(part);
+  }
+  return prefixParts.join('/');
+}
+
+function extractCandidateSuffixes(glob: string): string[] {
+  const clean = toPosixPath(glob).replace(/^!+/, '').replace(/^\.\//, '');
+  const last = clean.split('/').pop() ?? '';
+  const suffixes = new Set<string>();
+
+  // Expand simple brace patterns like *.{ts,tsx}
+  const braceMatch = /^(.*)\{([^}]+)\}(.*)$/.exec(last);
+  const expandedLast = braceMatch
+    ? braceMatch[2].split(',').map((opt) => `${braceMatch[1]}${opt.trim()}${braceMatch[3]}`)
+    : [last];
+
+  for (const pat of expandedLast) {
+    if (!pat || pat === '**' || pat === '*') {
+      suffixes.add('index.ts');
+      suffixes.add('index.tsx');
+      suffixes.add('index.test.ts');
+      suffixes.add('sample.spec.ts');
+    } else if (pat.startsWith('*.')) {
+      const ext = pat.slice(1); // e.g. .ts, .test.ts, .spec.ts
+      suffixes.add(`index${ext}`);
+      suffixes.add(`sample${ext}`);
+    } else if (pat.includes('*')) {
+      const replaced = pat.replace(/\*\*?/g, 'sample');
+      suffixes.add(replaced);
+    } else {
+      suffixes.add(pat);
+    }
+  }
+
+  return Array.from(suffixes);
+}
+
+/**
+ * Two-Tier Witness-Based Glob Intersection (ADR-0003).
+ * Tier 1: Tests real tracked repository files and returns the shortest matching path.
+ * Tier 2: Synthesizes candidate paths from static prefixes and suffixes of both glob sets.
+ */
+export function findWitnessIntersection(
+  globsA: string[],
+  globsB: string[],
+  repoFiles: string[],
+): string | null {
+  // Tier 1: Real repository files (prefer non-harness source files first, then shortest path)
+  const sourceFiles = repoFiles.filter((f) => !HARNESS_META_FILE_REGEX.test(f));
+  const sortedSourceFiles = [...sourceFiles].sort(
+    (a, b) => a.length - b.length || a.localeCompare(b),
+  );
+  for (const file of sortedSourceFiles) {
+    if (matchesGlobSet(file, globsA) && matchesGlobSet(file, globsB)) {
+      return toPosixPath(file);
+    }
+  }
+
+  const allSortedFiles = [...repoFiles].sort(
+    (a, b) => a.length - b.length || a.localeCompare(b),
+  );
+  for (const file of allSortedFiles) {
+    if (matchesGlobSet(file, globsA) && matchesGlobSet(file, globsB)) {
+      return toPosixPath(file);
+    }
+  }
+
+  // Tier 2: Synthetic candidate witness paths from static stems and suffixes
+  const posA = globsA.filter((g) => !g.startsWith('!'));
+  const posB = globsB.filter((g) => !g.startsWith('!'));
+
+  const prefixes = new Set<string>(['', 'src', 'packages/app/src']);
+  for (const g of [...posA, ...posB]) {
+    const p = extractStaticPrefix(g);
+    if (p) {
+      prefixes.add(p);
+      prefixes.add(`${p}/src`);
+      prefixes.add(`${p}/nested`);
+    }
+  }
+
+  // Also add combinations where one prefix nests inside or matches the other
+  const suffixes = new Set<string>([
+    'index.ts',
+    'index.tsx',
+    'index.test.ts',
+    'index.spec.ts',
+    'route.ts',
+    'page.tsx',
+    'schema.prisma',
+  ]);
+  for (const g of [...posA, ...posB]) {
+    for (const s of extractCandidateSuffixes(g)) {
+      suffixes.add(s);
+    }
+  }
+
+  const candidates: string[] = [];
+  for (const pre of prefixes) {
+    for (const suf of suffixes) {
+      const candidate = pre ? `${pre.replace(/\/+$/, '')}/${suf.replace(/^\/+/, '')}` : suf;
+      candidates.push(candidate);
+    }
+  }
+
+  candidates.sort((a, b) => a.length - b.length || a.localeCompare(b));
+  for (const candidate of candidates) {
+    if (matchesGlobSet(candidate, globsA) && matchesGlobSet(candidate, globsB)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+export function isUniversalRootGlobSet(globs: string[]): boolean {
+  const pos = globs.filter((g) => !g.startsWith('!'));
+  const neg = globs.filter((g) => g.startsWith('!'));
+  if (neg.length > 0) return false;
+  return pos.length === 0 || pos.every((g) => g === '**/*' || g === '**' || g === '*');
+}
+
