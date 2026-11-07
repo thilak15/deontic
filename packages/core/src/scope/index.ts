@@ -98,7 +98,14 @@ export function resolveAgentProfiles(relPath: string, format: HarnessFormat): Ag
     case 'mcp-config':
       if (posix === '.cursor/mcp.json') return ['cursor'];
       if (posix === '.vscode/mcp.json') return ['copilot'];
-      if (posix === '.mcp.json' || posix.endsWith('/.mcp.json')) return ['claude-code'];
+      if (
+        posix === '.mcp.json' ||
+        posix.endsWith('/.mcp.json') ||
+        posix === 'claude_desktop_config.json' ||
+        posix.endsWith('/claude_desktop_config.json')
+      ) {
+        return ['claude-code'];
+      }
       return ['claude-code', 'cursor', 'codex', 'copilot'];
   }
 }
