@@ -14,6 +14,7 @@ import type {
 import { loadWorkspaceConfig } from '../config/index.js';
 import { discoverWorkspaceFiles } from '../discovery/index.js';
 import { estimateTokenCount } from '../parser/index.js';
+import { evaluateMcpForWorkspace, probeMcpServers } from './04-mcp-schema.js';
 
 const AGENT_PROFILES: AgentProfileId[] = ['claude-code', 'cursor', 'codex', 'copilot'];
 
@@ -361,8 +362,22 @@ export async function profileWorkspaceCost(options: {
     },
   };
 
+  const liveMcpProfiles = options.probe
+    ? await probeMcpServers({ cwd: options.cwd })
+    : undefined;
+  const mcpEval = evaluateMcpForWorkspace(ctx, liveMcpProfiles);
   const profiles = buildProfileBudgets(ctx);
-  const diagnostics = runBloatCliffPass(ctx);
+
+  for (const profileId of AGENT_PROFILES) {
+    const srvs = mcpEval.serversByProfile[profileId] ?? [];
+    const cols = mcpEval.collisionsByProfile[profileId] ?? [];
+    profiles[profileId].mcpServers = srvs;
+    profiles[profileId].mcpCollisions = cols;
+    profiles[profileId].mcpToolCount = srvs.reduce((sum, s) => sum + s.toolCount, 0);
+    profiles[profileId].mcpTokens = srvs.reduce((sum, s) => sum + s.tokenCount, 0);
+  }
+
+  const diagnostics = [...runBloatCliffPass(ctx), ...mcpEval.diagnostics];
 
   return {
     cwd: options.cwd,

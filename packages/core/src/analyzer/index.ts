@@ -6,7 +6,7 @@ import { runImportsPass } from './00-imports.js';
 import { runContradictionPass } from './01-contradiction.js';
 import { runGroundTruthPass } from './02-ground-truth.js';
 import { runBloatCliffPass } from './03-bloat-cliff.js';
-import { runMcpSchemaPass } from './04-mcp-schema.js';
+import { runMcpSchemaPass, probeMcpServers } from './04-mcp-schema.js';
 import { runRedundancyPass } from './05-redundancy.js';
 import { runTraceRoiPass } from './06-trace-roi.js';
 
@@ -91,12 +91,16 @@ export async function analyzeWorkspace(options: AnalyzeOptions): Promise<Workspa
     options,
   };
 
+  const liveProfiles = options.probe
+    ? await probeMcpServers({ cwd: options.cwd })
+    : undefined;
+
   const rawDiagnostics: Diagnostic[] = [
     ...runImportsPass(ctx),
     ...runContradictionPass(ctx),
     ...runGroundTruthPass(ctx),
     ...runBloatCliffPass(ctx),
-    ...runMcpSchemaPass(ctx),
+    ...runMcpSchemaPass(ctx, liveProfiles),
     ...runRedundancyPass(ctx),
     ...runTraceRoiPass(ctx),
   ];
