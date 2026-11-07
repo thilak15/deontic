@@ -267,22 +267,11 @@ function resolveMovedOrRenamedPath(
 ): { newPath: string; commitSha?: string } | null {
   const posixMissing = toPosixPath(missingPath).replace(/^\.\//, '').replace(/\/+$/, '');
 
-  // Tier 1: Query git log --full-history -M --diff-filter=R
+  // Tier 1: Query git log for the commit that deleted `posixMissing`, then inspect that commit with `-M` rename detection
   try {
-    const gitOut = execFileSync(
+    const delShasRaw = execFileSync(
       'git',
-      [
-        'log',
-        '--full-history',
-        '-M',
-        '--diff-filter=R',
-        '--format=COMMIT:%h',
-        '--name-status',
-        '-n',
-        '5',
-        '--',
-        posixMissing,
-      ],
+      ['log', '--full-history', '--diff-filter=D', '--format=%h', '-n', '5', '--', posixMissing],
       {
         cwd: ctx.cwd,
         encoding: 'utf8',
@@ -290,21 +279,32 @@ function resolveMovedOrRenamedPath(
         timeout: 1500,
       },
     );
+    const shas = delShasRaw
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-    let currentSha: string | undefined;
-    for (const rawLine of gitOut.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (line.startsWith('COMMIT:')) {
-        currentSha = line.slice('COMMIT:'.length).trim();
-        continue;
-      }
-      if (/^R\d+\t/.test(line)) {
-        const parts = line.split('\t');
-        if (parts.length >= 3) {
-          const oldP = toPosixPath(parts[1].trim());
-          const newP = toPosixPath(parts[2].trim());
-          if (oldP === posixMissing && fs.existsSync(path.resolve(ctx.cwd, newP))) {
-            return { newPath: newP, commitSha: currentSha };
+    for (const sha of shas) {
+      const showOut = execFileSync(
+        'git',
+        ['show', '-M', '--diff-filter=R', '--format=COMMIT:%h', '--name-status', sha],
+        {
+          cwd: ctx.cwd,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 1500,
+        },
+      );
+      for (const rawLine of showOut.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (/^R\d+\t/.test(line)) {
+          const parts = line.split('\t');
+          if (parts.length >= 3) {
+            const oldP = toPosixPath(parts[1].trim());
+            const newP = toPosixPath(parts[2].trim());
+            if (oldP === posixMissing && fs.existsSync(path.resolve(ctx.cwd, newP))) {
+              return { newPath: newP, commitSha: sha };
+            }
           }
         }
       }
