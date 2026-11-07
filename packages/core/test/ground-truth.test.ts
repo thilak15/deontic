@@ -151,7 +151,7 @@ describe('Slice 3: CTX005 Dead Script & Makefile Target Verification + check --f
       'CLAUDE.md': [
         '# Commands',
         '- Always run `pnpm install` and `pnpm build` first.',
-        '- Run `npm run test:unit:watch` before committing.',
+        '- Run `pnpm run test:unit:watch` before committing.',
         '- Run `make deploy-stagin` to deploy to staging.',
       ].join('\n'),
     });
@@ -175,7 +175,7 @@ describe('Slice 3: CTX005 Dead Script & Makefile Target Verification + check --f
     expect(cliFix.exitCode).toBe(0);
 
     const updated = fs.readFileSync(path.join(cwd, 'CLAUDE.md'), 'utf8');
-    expect(updated).toContain('npm run test:unit');
+    expect(updated).toContain('pnpm run test:unit');
     expect(updated).not.toContain('test:unit:watch');
     expect(updated).toContain('make deploy-staging');
 
