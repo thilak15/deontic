@@ -830,9 +830,29 @@ export function parseHarnessFile(
     if (!pos) continue;
 
     if (child.type === 'html') {
-      const syncMarker = pragmas.syncMarkersByLine.get(pos.start.line);
+      const htmlValue = 'value' in child && typeof child.value === 'string' ? child.value : '';
+      if (/<!--\s*\/deontic:sync\s*-->/i.test(htmlValue)) {
+        pendingSyncMarker = undefined;
+        currentSection = null;
+        continue;
+      }
+      const inlineSyncMatch = /<!--\s*deontic:sync\s+id="([^"]+)"\s+globs="([^"]*)"\s*-->/i.exec(
+        htmlValue,
+      );
+      const syncMarker =
+        pragmas.syncMarkersByLine.get(pos.start.line) ??
+        (inlineSyncMatch
+          ? {
+              id: inlineSyncMatch[1],
+              globs: inlineSyncMatch[2]
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean),
+            }
+          : undefined);
       if (syncMarker) {
         pendingSyncMarker = syncMarker;
+        currentSection = null;
       }
       continue;
     }
@@ -844,7 +864,6 @@ export function parseHarnessFile(
         pendingSyncMarker ??
         pragmas.syncMarkersByLine.get(pos.start.line - 1) ??
         pragmas.syncMarkersByLine.get(pos.start.line);
-      pendingSyncMarker = undefined;
 
       currentSection = startNewSection(
         headingText,
@@ -867,7 +886,7 @@ export function parseHarnessFile(
 
     if (!currentSection) {
       currentSection = startNewSection(
-        '(Root)',
+        pendingSyncMarker ? `(Synced:${pendingSyncMarker.id})` : '(Root)',
         0,
         pos.start.line,
         pos.start.column,
@@ -875,7 +894,6 @@ export function parseHarnessFile(
         pos.end.column,
         pendingSyncMarker,
       );
-      pendingSyncMarker = undefined;
     }
 
     if (child.type === 'list') {
