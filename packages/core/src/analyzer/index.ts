@@ -115,5 +115,6 @@ export async function analyzeWorkspace(options: AnalyzeOptions): Promise<Workspa
     diagnostics,
     appliedFixes,
     config,
+    excludedCheckouts: discovered.excludedCheckouts,
   };
 }

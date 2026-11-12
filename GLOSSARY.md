@@ -30,6 +30,10 @@ _Avoid_: Info directive, informational rule, passive instruction
 A Context Note consisting of an ASCII file tree or a pure path-catalog list that duplicates repository structure an agent can discover directly from the filesystem.
 _Avoid_: File map, repo outline
 
+**Checkout Boundary**:
+A directory root representing an independent repository checkout or Git worktree nested within or alongside the workspace being audited.
+_Avoid_: Sub-repo, nested clone, worktree folder
+
 
 ### Scope & Diagnostics
 
@@ -68,5 +72,10 @@ _Avoid_: Schema conflict, argument mismatch
 **Session Hit Rate**:
 The percentage of recorded local agent sessions in which the agent touches at least one file or runs at least one command matching a Rule Section's scope.
 _Avoid_: Rule usage count, activation score
+
+**Diagnostic Group**:
+A single consolidated finding anchored on one canonical primary location that aggregates all duplicate or related occurrences as secondary locations underneath it.
+_Avoid_: Cluster, deduplicated warning, bundled error
+
 
 

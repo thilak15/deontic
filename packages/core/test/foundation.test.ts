@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -337,6 +338,89 @@ describe('Slice 5: deontic check CLI (--format pretty | json, --agent, --strict,
     expect(strictRes.stdout).toContain('warning[CTX006]:');
   });
 });
+
+describe('Slice 6: Checkout Boundary Detection & Git Worktree Isolation (ADR-0005)', () => {
+  it('excludes child directories containing .git metadata (directory or gitlink file) as Checkout Boundaries without blindly ignoring tmp/, and degrades gracefully outside Git repos', async () => {
+    const cwd = createTempWorkspace({
+      'CLAUDE.md': '# Main Checkout\n- Always use pnpm.\n',
+      'src/index.ts': 'export const main = true;\n',
+      // Legitimate non-checkout files inside tmp/ -> MUST be discovered
+      'tmp/fixtures/AGENTS.md': '# Fixture Agents\n- Always use pnpm.\n',
+      'tmp/fixtures/sample.ts': 'export const sample = 1;\n',
+      // Nested standalone clone in tmp/ with a .git/HEAD directory entry -> Checkout Boundary
+      'tmp/standalone-clone/.git/HEAD': 'ref: refs/heads/main\n',
+      'tmp/standalone-clone/CLAUDE.md': '# Clone Claude\n- Never use pnpm.\n',
+      'tmp/standalone-clone/src/app.ts': 'export const clone = true;\n',
+      // Nested submodule / worktree with a .git gitlink file -> Checkout Boundary
+      'vendor/sub-checkout/.git': 'gitdir: ../../.git/modules/sub-checkout\n',
+      'vendor/sub-checkout/AGENTS.md': '# Submodule Agents\n- Never use pnpm.\n',
+      'vendor/sub-checkout/index.ts': 'export const sub = true;\n',
+    });
+
+    const result = await analyzeWorkspace({ cwd });
+
+    expect(result.harnessFiles.map((f) => f.path)).toEqual([
+      'CLAUDE.md',
+      'tmp/fixtures/AGENTS.md',
+    ]);
+    expect(result.repoFiles).toEqual([
+      'CLAUDE.md',
+      'src/index.ts',
+      'tmp/fixtures/AGENTS.md',
+      'tmp/fixtures/sample.ts',
+    ]);
+    expect(result.excludedCheckouts).toEqual([
+      'tmp/standalone-clone',
+      'vendor/sub-checkout',
+    ]);
+    // Because the conflicting clone and submodule were excluded as Checkout Boundaries, zero CTX001 contradictions occur
+    expect(result.diagnostics.filter((d) => d.code === 'CTX001')).toHaveLength(0);
+  });
+
+  it('detects registered Git worktrees via git worktree list (even inside .worktrees/ or gitignored dirs) and audits a selected worktree in isolation when targeted as cwd', async () => {
+    const cwd = createTempWorkspace({
+      '.gitignore': '.worktrees/\n',
+      'CLAUDE.md': '# Main Repo\n- Always use pnpm.\n',
+      'src/index.ts': 'export const ok = true;\n',
+    });
+
+    execFileSync('git', ['init'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd, stdio: 'ignore' });
+
+    const wtHidden = path.join(cwd, '.worktrees', 'feat-alpha');
+    const wtTmp = path.join(cwd, 'tmp', 'wt-beta');
+    execFileSync('git', ['worktree', 'add', '-b', 'feat-alpha', wtHidden], { cwd, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', '-b', 'wt-beta', wtTmp], { cwd, stdio: 'ignore' });
+
+    // Modify the Harness Files inside the linked worktrees so they would conflict if scanned together
+    fs.writeFileSync(path.join(wtHidden, 'CLAUDE.md'), '# Alpha Worktree\n- Never use pnpm.\n', 'utf8');
+    fs.writeFileSync(path.join(wtTmp, 'CLAUDE.md'), '# Beta Worktree\n- Never use pnpm.\n', 'utf8');
+
+    // 1. Auditing main checkout excludes both registered worktrees and records both in excludedCheckouts
+    const mainRes = await analyzeWorkspace({ cwd });
+    expect(mainRes.harnessFiles.map((f) => f.path)).toEqual(['CLAUDE.md']);
+    expect(mainRes.excludedCheckouts).toEqual([
+      '.worktrees/feat-alpha',
+      'tmp/wt-beta',
+    ]);
+    expect(mainRes.diagnostics.filter((d) => d.code === 'CTX001')).toHaveLength(0);
+
+    // 2. Auditing the linked worktree inside .worktrees/feat-alpha directly audits ONLY that worktree
+    // and still excludes any deeper child Checkout Boundary nested inside it
+    fs.mkdirSync(path.join(wtHidden, 'nested-clone', '.git'), { recursive: true });
+    fs.writeFileSync(path.join(wtHidden, 'nested-clone', '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+    fs.writeFileSync(path.join(wtHidden, 'nested-clone', 'CLAUDE.md'), '# Deeper Clone\n- Always use pnpm.\n', 'utf8');
+
+    const alphaRes = await analyzeWorkspace({ cwd: wtHidden });
+    expect(alphaRes.harnessFiles.map((f) => f.path)).toEqual(['CLAUDE.md']);
+    expect(alphaRes.harnessFiles[0].rawContent).toContain('# Alpha Worktree');
+    expect(alphaRes.excludedCheckouts).toEqual(['nested-clone']);
+  });
+});
+
 
 
 

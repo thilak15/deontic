@@ -215,6 +215,7 @@ export interface WorkspaceAnalysisResult {
   diagnostics: Diagnostic[];
   appliedFixes: DiagnosticFix[];
   config: ResolvedDeonticConfig;
+  excludedCheckouts: string[];
 }
 
 export interface ProfileFileCost {
