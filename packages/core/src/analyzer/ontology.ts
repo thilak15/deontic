@@ -120,14 +120,17 @@ export function normalizeCondition(rawText: string, rawCond?: string): string | 
 
 export function extractExcludedPathsFromProse(rawText: string): string[] {
   const excluded: string[] = [];
-  // Matches: "except in packages/legacy/**", "(except in packages/legacy/**)", "outside of packages/legacy/**"
+  // Matches: "except in packages/legacy/**", "(except in packages/api/**, packages/web/**)", "outside of packages/legacy/**"
   const regex =
-    /\b(?:except(?:\s+in|\s+for|\s+under)?|outside(?:\s+of)?|excluding|unless\s+in)\s+[`"]?([A-Za-z0-9_./*-]+)[`"]?/gi;
+    /\b(?:except(?:\s+in|\s+for|\s+under)?|outside(?:\s+of)?|excluding|unless\s+in)\s+([`A-Za-z0-9_./*,\s-]+?)(?=[.)!?;]|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(rawText)) !== null) {
-    const cleaned = m[1].replace(/[.,:;!?)]+$/, '').trim();
-    if (cleaned) {
-      excluded.push(cleaned);
+    const rawList = m[1];
+    for (const part of rawList.split(/,|\band\b/i)) {
+      const cleaned = part.replace(/^[`'"]+|[`'",.:;!?)]+$/g, '').trim();
+      if (cleaned && /[/*.]/.test(cleaned)) {
+        excluded.push(cleaned);
+      }
     }
   }
   return excluded;

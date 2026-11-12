@@ -203,6 +203,70 @@ describe('Slice 4: Same-Agent-Profile Redundancy (CTX008) vs Cross-Profile Isola
     expect(ctx008[0].agentProfile).toBe('claude-code');
     expect(ctx008[0].primaryLocation.file).toBe('.claude/rules/workflow.md');
   });
+
+  it('exempts on-demand SKILL.md files and distinct workflow/domain sections in the same file from CTX008, while consolidating k >= 3 duplicates into 1 Diagnostic Group with rawOccurrenceCount', async () => {
+    const cwd = createTempWorkspace({
+      'CLAUDE.md': [
+        '# Overview',
+        '- Always run `pnpm test` before opening a pull request.',
+        '',
+        '## General Rules',
+        '- Always use pnpm for package management.',
+        '- Always use pnpm as the package manager.',
+        '',
+        '## PR & Release Checklist',
+        '- Always run `pnpm test` before opening a pull request.',
+      ].join('\n'),
+      '.claude/rules/a.md': '# Rule A\n- Always use pnpm for package management.\n',
+      '.claude/rules/b.md': '# Rule B\n- Always use pnpm for package management.\n',
+      // On-demand skill (alwaysApply not true) repeating the same directive -> MUST NOT be flagged
+      '.claude/skills/deploy/SKILL.md': '# Deploy Skill\n- Always use pnpm for package management.\n- Always run `pnpm test` before opening a pull request.\n',
+      'src/index.ts': 'export const a = 1;\n',
+    });
+
+    const res = await analyzeWorkspace({ cwd });
+    const ctx008 = res.diagnostics.filter((d) => d.code === 'CTX008');
+
+    // 1. On-demand SKILL.md and Overview vs PR Checklist cross-section reminder produce 0 false positives.
+    // 2. The 4 pnpm directives (2 in CLAUDE.md##General Rules + .claude/rules/a.md + .claude/rules/b.md)
+    //    are consolidated into a SINGLE Diagnostic Group instead of C(4,2) = 6 pairwise warnings!
+    expect(ctx008).toHaveLength(1);
+    const group = ctx008[0];
+    expect(group.rawOccurrenceCount).toBe(6);
+    // 1 primary duplicate + 1 original + 2 remaining duplicates = 3 secondaryLocations
+    expect(group.secondaryLocations).toHaveLength(3);
+    expect(
+      [group.primaryLocation.file, ...(group.secondaryLocations ?? []).map((s) => s.file)].every(
+        (f) => !f.includes('SKILL.md'),
+      ),
+    ).toBe(true);
+
+    // 3. A SKILL.md with `alwaysApply: true` IS part of Turn-0 Load and IS included in CTX008
+    const cwdAlwaysSkill = createTempWorkspace({
+      'CLAUDE.md': '# Root\n- Always use pnpm for package management.\n',
+      '.claude/skills/always/SKILL.md':
+        '---\nalwaysApply: true\n---\n# Always Skill\n- Always use pnpm for package management.\n',
+      'src/index.ts': 'export const a = 1;\n',
+    });
+    const resAlwaysSkill = await analyzeWorkspace({ cwd: cwdAlwaysSkill });
+    const ctx008Always = resAlwaysSkill.diagnostics.filter((d) => d.code === 'CTX008');
+    expect(ctx008Always).toHaveLength(1);
+    expect(ctx008Always[0].primaryLocation.file).toBe('.claude/skills/always/SKILL.md');
+
+    // 4. CTX001: 1 root Directive conflicting with 2 peer Directives on the same topic consolidates into 1 Diagnostic Group with rawOccurrenceCount = 2
+    const cwdCtx001Group = createTempWorkspace({
+      'CLAUDE.md': '# Root Claude\n- Always use pnpm for package management.\n',
+      'AGENTS.md': '# Codex Agents\n- Never use pnpm for package management.\n',
+      '.cursor/rules/pkg.mdc':
+        '---\nalwaysApply: true\n---\n# Cursor\n- Always use npm for package management.\n',
+      'src/index.ts': 'export const a = 1;\n',
+    });
+    const resCtx001Group = await analyzeWorkspace({ cwd: cwdCtx001Group });
+    const ctx001 = resCtx001Group.diagnostics.filter((d) => d.code === 'CTX001');
+    expect(ctx001).toHaveLength(1);
+    expect(ctx001[0].rawOccurrenceCount).toBe(2);
+    expect(ctx001[0].secondaryLocations).toHaveLength(2);
+  });
 });
 
 describe('Slice 5: Property-Based Tests (fast-check) for Solver & Scope Invariants', () => {

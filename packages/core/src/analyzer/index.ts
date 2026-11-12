@@ -1,4 +1,12 @@
-import type { AnalyzeOptions, Diagnostic, WorkspaceAnalysisResult, WorkspaceContext } from '../types.js';
+import type {
+  AnalyzeOptions,
+  Diagnostic,
+  DiagnosticCode,
+  RuleDiagnosticSummary,
+  WorkspaceAnalysisResult,
+  WorkspaceAnalysisSummary,
+  WorkspaceContext,
+} from '../types.js';
 import { loadWorkspaceConfig } from '../config/index.js';
 import { discoverWorkspaceFiles } from '../discovery/index.js';
 import { applyFixesToWorkspace } from '../autofix/index.js';
@@ -78,6 +86,64 @@ export function filterAndMapDiagnostics(
   return result;
 }
 
+export function buildAnalysisSummary(
+  diagnostics: Diagnostic[],
+  excludedCheckouts: string[],
+): WorkspaceAnalysisSummary {
+  let groupedErrorCount = 0;
+  let groupedWarningCount = 0;
+  let rawErrorCount = 0;
+  let rawWarningCount = 0;
+  let fixableCount = 0;
+
+  const byRuleMap = new Map<string, RuleDiagnosticSummary>();
+
+  for (const diag of diagnostics) {
+    const rawCount = diag.rawOccurrenceCount ?? 1;
+    const isFixable = Boolean(diag.fix && diag.fix.edits.length > 0);
+    if (isFixable) {
+      fixableCount += 1;
+    }
+    if (diag.severity === 'error') {
+      groupedErrorCount += 1;
+      rawErrorCount += rawCount;
+    } else {
+      groupedWarningCount += 1;
+      rawWarningCount += rawCount;
+    }
+
+    const key = `${diag.code}::${diag.severity}`;
+    const existing = byRuleMap.get(key);
+    if (existing) {
+      existing.groupedCount += 1;
+      existing.rawCount += rawCount;
+      if (isFixable) existing.fixableCount += 1;
+    } else {
+      byRuleMap.set(key, {
+        code: diag.code as DiagnosticCode,
+        severity: diag.severity,
+        groupedCount: 1,
+        rawCount,
+        fixableCount: isFixable ? 1 : 0,
+      });
+    }
+  }
+
+  const byRule = Array.from(byRuleMap.values()).sort(
+    (a, b) => a.code.localeCompare(b.code) || a.severity.localeCompare(b.severity),
+  );
+
+  return {
+    groupedErrorCount,
+    groupedWarningCount,
+    rawErrorCount,
+    rawWarningCount,
+    fixableCount,
+    excludedCheckouts,
+    byRule,
+  };
+}
+
 export async function analyzeWorkspace(options: AnalyzeOptions): Promise<WorkspaceAnalysisResult> {
   const config = loadWorkspaceConfig(options.cwd, options.config);
   const discovered = discoverWorkspaceFiles(options.cwd, config);
@@ -88,6 +154,7 @@ export async function analyzeWorkspace(options: AnalyzeOptions): Promise<Workspa
     harnessFiles: discovered.harnessFiles,
     repoFiles: discovered.repoFiles,
     gitignorePatterns: discovered.gitignorePatterns,
+    excludedCheckouts: discovered.excludedCheckouts,
     options,
   };
 
@@ -107,6 +174,7 @@ export async function analyzeWorkspace(options: AnalyzeOptions): Promise<Workspa
 
   const diagnostics = filterAndMapDiagnostics(rawDiagnostics, ctx);
   const appliedFixes = options.fix ? applyFixesToWorkspace(options.cwd, diagnostics) : [];
+  const summary = buildAnalysisSummary(diagnostics, discovered.excludedCheckouts);
 
   return {
     cwd: options.cwd,
@@ -116,5 +184,6 @@ export async function analyzeWorkspace(options: AnalyzeOptions): Promise<Workspa
     appliedFixes,
     config,
     excludedCheckouts: discovered.excludedCheckouts,
+    summary,
   };
 }

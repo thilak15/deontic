@@ -163,12 +163,31 @@ export interface Diagnostic {
   message: string;
   primaryLocation: DiagnosticLocation;
   secondaryLocations?: DiagnosticLocation[];
+  rawOccurrenceCount?: number;
   witnessPath?: string;
   suggestion?: string;
   help?: string;
   agentProfile?: AgentProfileId;
   fix?: DiagnosticFix;
   metadata?: Record<string, unknown>;
+}
+
+export interface RuleDiagnosticSummary {
+  code: DiagnosticCode;
+  severity: DiagnosticSeverity;
+  groupedCount: number;
+  rawCount: number;
+  fixableCount: number;
+}
+
+export interface WorkspaceAnalysisSummary {
+  groupedErrorCount: number;
+  groupedWarningCount: number;
+  rawErrorCount: number;
+  rawWarningCount: number;
+  fixableCount: number;
+  excludedCheckouts: string[];
+  byRule: RuleDiagnosticSummary[];
 }
 
 export type RuleSeveritySetting = 'error' | 'warn' | 'warning' | 'off';
@@ -205,6 +224,7 @@ export interface WorkspaceContext {
   harnessFiles: HarnessFile[];
   repoFiles: string[];
   gitignorePatterns: string[];
+  excludedCheckouts?: string[];
   options: AnalyzeOptions;
 }
 
@@ -216,6 +236,7 @@ export interface WorkspaceAnalysisResult {
   appliedFixes: DiagnosticFix[];
   config: ResolvedDeonticConfig;
   excludedCheckouts: string[];
+  summary: WorkspaceAnalysisSummary;
 }
 
 export interface ProfileFileCost {

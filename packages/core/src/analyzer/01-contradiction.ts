@@ -83,13 +83,13 @@ function isAncestorChildRelationship(
   return null;
 }
 
-function buildAncestorExclusionFix(
+function buildAncestorExclusionFixForGlobs(
   cwd: string,
   ancestor: DirectiveNode,
-  child: DirectiveNode,
+  childPositiveGlobs: string[],
 ): Diagnostic['fix'] | undefined {
-  const childPositiveGlobs = child.effectiveGlobs.filter((g) => !g.startsWith('!'));
-  if (childPositiveGlobs.length === 0) return undefined;
+  const uniqueGlobs = Array.from(new Set(childPositiveGlobs)).filter(Boolean);
+  if (uniqueGlobs.length === 0) return undefined;
 
   const absPath = path.resolve(cwd, ancestor.sourceFile);
   let fileContent = '';
@@ -104,7 +104,7 @@ function buildAncestorExclusionFix(
   if (targetLineIdx < 0 || targetLineIdx >= lines.length) return undefined;
 
   const originalLine = lines[targetLineIdx];
-  const scopeText = childPositiveGlobs.join(', ');
+  const scopeText = uniqueGlobs.join(', ');
   if (originalLine.includes(`except in ${scopeText}`)) {
     return undefined;
   }
@@ -127,6 +127,15 @@ function buildAncestorExclusionFix(
       },
     ],
   };
+}
+
+function buildAncestorExclusionFix(
+  cwd: string,
+  ancestor: DirectiveNode,
+  child: DirectiveNode,
+): Diagnostic['fix'] | undefined {
+  const childPositiveGlobs = child.effectiveGlobs.filter((g) => !g.startsWith('!'));
+  return buildAncestorExclusionFixForGlobs(cwd, ancestor, childPositiveGlobs);
 }
 
 export function evaluateDirectivePair(
@@ -180,25 +189,51 @@ export function evaluateDirectivePair(
               `Narrower child directive in ${childScopeDesc} (${child.modality})`,
             ),
           ],
+          rawOccurrenceCount: 1,
           witnessPath,
           suggestion: `Scope ${ancestor.sourceFile}:${ancestor.lineStart} to exclude ${childScopeDesc} or add <!-- deontic-override: ${childScopeDesc} -->.`,
           help: `Because ${ancestor.sourceFile} is unconditionally loaded at Turn 0, the agent sees both conflicting directives simultaneously when editing ${witnessPath}.`,
           fix,
+          metadata: {
+            groupKey: `CTX003::${ancestor.sourceFile}:${ancestor.lineStart}::${a.topic}`,
+            ancestorDirective: ancestor,
+            childPositiveGlobs: child.effectiveGlobs.filter((g) => !g.startsWith('!')),
+          },
         };
       }
 
       const isHard = a.strength === 'HARD' && b.strength === 'HARD';
       const severity = isHard ? 'error' : 'warning';
 
+      // Canonicalize primary vs secondary for CTX001 so root non-dotfile Harness Files anchor the Diagnostic Group
+      const aRootNonDot = dA.isAlwaysLoadedAtRoot && !dA.sourceFile.startsWith('.');
+      const bRootNonDot = dB.isAlwaysLoadedAtRoot && !dB.sourceFile.startsWith('.');
+      const [primaryD, secondaryD] =
+        !aRootNonDot && bRootNonDot
+          ? [dB, dA]
+          : !dA.isAlwaysLoadedAtRoot && dB.isAlwaysLoadedAtRoot
+            ? [dB, dA]
+            : [dA, dB];
+
       return {
         code: 'CTX001',
         severity,
-        message: `Same-Scope Contradiction (${conflict.reason}) on witness path '${witnessPath}' between ${dA.sourceFile}:${dA.lineStart} and ${dB.sourceFile}:${dB.lineStart}`,
-        primaryLocation: makeDirectiveLocation(dA, `${dA.modality}: "${dA.rawText}"`),
-        secondaryLocations: [makeDirectiveLocation(dB, `${dB.modality}: "${dB.rawText}"`)],
+        message: `Same-Scope Contradiction (${conflict.reason}) on witness path '${witnessPath}' between ${primaryD.sourceFile}:${primaryD.lineStart} and ${secondaryD.sourceFile}:${secondaryD.lineStart}`,
+        primaryLocation: makeDirectiveLocation(primaryD, `${primaryD.modality}: "${primaryD.rawText}"`),
+        secondaryLocations: [
+          makeDirectiveLocation(secondaryD, `${secondaryD.modality}: "${secondaryD.rawText}"`),
+        ],
+        rawOccurrenceCount: 1,
         witnessPath,
         suggestion: `Resolve the conflicting ${a.topic} directives or scope them to disjoint file globs.`,
         help: `Both directives apply simultaneously to '${witnessPath}'.`,
+        metadata: {
+          groupKey: `CTX001::${a.topic}::${a.action}::${severity}`,
+          directiveA: primaryD,
+          directiveB: secondaryD,
+          conflictReason: conflict.reason,
+          topic: a.topic,
+        },
       };
     }
   }
@@ -206,12 +241,33 @@ export function evaluateDirectivePair(
   return null;
 }
 
+function isDirectiveSuppressed(
+  d: DirectiveNode,
+  code: 'CTX001' | 'CTX003',
+  fileMap: Map<string, HarnessFile>,
+): boolean {
+  if (d.suppressedCodes.includes(code)) return true;
+  const hf = fileMap.get(d.sourceFile);
+  if (!hf) return false;
+  if (hf.suppressedCodes.includes(code)) return true;
+  const sec = hf.sections.find((s) => s.id === d.sectionId);
+  if (sec?.suppressedCodes.includes(code)) return true;
+  return false;
+}
+
 export function runContradictionPass(ctx: WorkspaceContext): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
+  const rawDiagnostics: Diagnostic[] = [];
   const fileMap = new Map<string, HarnessFile>(ctx.harnessFiles.map((f) => [f.path, f]));
   const allDirectives: DirectiveNode[] = [];
 
   for (const hf of ctx.harnessFiles) {
+    if (
+      ctx.options.agent &&
+      hf.agentProfiles.length > 0 &&
+      !hf.agentProfiles.includes(ctx.options.agent)
+    ) {
+      continue;
+    }
     for (const d of hf.directives) {
       allDirectives.push(d);
     }
@@ -229,11 +285,168 @@ export function runContradictionPass(ctx: WorkspaceContext): Diagnostic[] {
 
       const diag = evaluateDirectivePair(dA, dB, ctx.repoFiles, ctx.cwd, fileMap);
       if (diag) {
+        const code = diag.code as 'CTX001' | 'CTX003';
+        if (
+          isDirectiveSuppressed(dA, code, fileMap) ||
+          isDirectiveSuppressed(dB, code, fileMap)
+        ) {
+          continue;
+        }
         seenPairs.add(pairKey);
-        diagnostics.push(diag);
+        rawDiagnostics.push(diag);
       }
     }
   }
 
-  return diagnostics;
+  // Consolidate repeated CTX003 and CTX001 diagnostics into Diagnostic Groups
+  const groups = new Map<string, Diagnostic[]>();
+  const ctx001Buckets = new Map<string, Diagnostic[]>();
+  for (const diag of rawDiagnostics) {
+    const key =
+      typeof diag.metadata?.groupKey === 'string'
+        ? diag.metadata.groupKey
+        : `${diag.code}::${diag.primaryLocation.file}:${diag.primaryLocation.lineStart}::${diag.message}`;
+    if (diag.code === 'CTX001') {
+      const list = ctx001Buckets.get(key) ?? [];
+      list.push(diag);
+      ctx001Buckets.set(key, list);
+    } else {
+      const list = groups.get(key) ?? [];
+      list.push(diag);
+      groups.set(key, list);
+    }
+  }
+
+  // Within each CTX001 topic+severity bucket, split by connected component of Directive locations
+  let compSeq = 0;
+  for (const [bucketKey, bucketItems] of ctx001Buckets.entries()) {
+    const parent = new Map<string, string>();
+    const find = (x: string): string => {
+      let root = parent.get(x) ?? x;
+      if (root !== x) {
+        root = find(root);
+        parent.set(x, root);
+      } else if (!parent.has(x)) {
+        parent.set(x, x);
+      }
+      return root;
+    };
+    const union = (a: string, b: string): void => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent.set(rb, ra);
+    };
+
+    for (const item of bucketItems) {
+      const dA = item.metadata?.directiveA as DirectiveNode | undefined;
+      const dB = item.metadata?.directiveB as DirectiveNode | undefined;
+      const kA = dA
+        ? `${dA.sourceFile}:${dA.lineStart}`
+        : `${item.primaryLocation.file}:${item.primaryLocation.lineStart}`;
+      const kB = dB
+        ? `${dB.sourceFile}:${dB.lineStart}`
+        : `${item.secondaryLocations?.[0]?.file ?? ''}:${item.secondaryLocations?.[0]?.lineStart ?? 0}`;
+      union(kA, kB);
+    }
+
+    for (const item of bucketItems) {
+      const dA = item.metadata?.directiveA as DirectiveNode | undefined;
+      const kA = dA
+        ? `${dA.sourceFile}:${dA.lineStart}`
+        : `${item.primaryLocation.file}:${item.primaryLocation.lineStart}`;
+      const root = find(kA);
+      const compKey = `${bucketKey}::${root}::${compSeq}`;
+      // Use deterministic key without compSeq
+      const detKey = `${bucketKey}::${root}`;
+      void compKey;
+      const list = groups.get(detKey) ?? [];
+      list.push(item);
+      groups.set(detKey, list);
+    }
+    compSeq += 1;
+  }
+
+  const consolidated: Diagnostic[] = [];
+  for (const items of groups.values()) {
+    const first = items[0];
+    if (items.length === 1) {
+      consolidated.push(first);
+      continue;
+    }
+
+    if (first.code === 'CTX003') {
+      const secondaryLocations: DiagnosticLocation[] = [];
+      const seenLocs = new Set<string>();
+      for (const item of items) {
+        for (const sec of item.secondaryLocations ?? []) {
+          const locKey = `${sec.file}:${sec.lineStart}:${sec.columnStart}`;
+          if (!seenLocs.has(locKey)) {
+            seenLocs.add(locKey);
+            secondaryLocations.push(sec);
+          }
+        }
+      }
+
+      const ancestor = first.metadata?.ancestorDirective as DirectiveNode | undefined;
+      const allChildGlobs: string[] = [];
+      for (const item of items) {
+        const globs = (item.metadata?.childPositiveGlobs as string[] | undefined) ?? [];
+        allChildGlobs.push(...globs);
+      }
+      const uniqueScopeDesc = Array.from(new Set(allChildGlobs)).join(', ');
+      const mergedFix = ancestor
+        ? buildAncestorExclusionFixForGlobs(ctx.cwd, ancestor, allChildGlobs)
+        : first.fix;
+
+      consolidated.push({
+        ...first,
+        message: `${first.message} (and ${items.length - 1} other child override(s) in ${uniqueScopeDesc})`,
+        secondaryLocations,
+        rawOccurrenceCount: items.length,
+        suggestion: `Scope ${first.primaryLocation.file}:${first.primaryLocation.lineStart} to exclude ${uniqueScopeDesc} or add <!-- deontic-override -->.`,
+        fix: mergedFix,
+      });
+    } else {
+      // CTX001 group: pick the Directive with the highest conflict degree in the group as primaryLocation
+      const degree = new Map<string, { count: number; directive: DirectiveNode }>();
+      const bump = (d?: DirectiveNode) => {
+        if (!d) return;
+        const k = `${d.sourceFile}:${d.lineStart}`;
+        const cur = degree.get(k);
+        if (cur) cur.count += 1;
+        else degree.set(k, { count: 1, directive: d });
+      };
+      for (const item of items) {
+        bump(item.metadata?.directiveA as DirectiveNode | undefined);
+        bump(item.metadata?.directiveB as DirectiveNode | undefined);
+      }
+      const sortedNodes = Array.from(degree.values()).sort(
+        (a, b) =>
+          b.count - a.count ||
+          a.directive.sourceFile.localeCompare(b.directive.sourceFile) ||
+          a.directive.lineStart - b.directive.lineStart,
+      );
+      const anchor = sortedNodes[0]?.directive;
+      const others = sortedNodes.slice(1).map((n) => n.directive);
+
+      if (anchor && others.length > 0) {
+        consolidated.push({
+          ...first,
+          message: `${first.message} (and ${items.length - 1} other conflicting directive(s))`,
+          primaryLocation: makeDirectiveLocation(anchor, `${anchor.modality}: "${anchor.rawText}"`),
+          secondaryLocations: others.map((d) =>
+            makeDirectiveLocation(d, `${d.modality}: "${d.rawText}"`),
+          ),
+          rawOccurrenceCount: items.length,
+        });
+      } else {
+        consolidated.push({
+          ...first,
+          rawOccurrenceCount: items.length,
+        });
+      }
+    }
+  }
+
+  return consolidated;
 }
