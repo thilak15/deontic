@@ -183,3 +183,84 @@ describe('Slice 3: CTX005 Dead Script & Makefile Target Verification + check --f
     expect(afterFix.diagnostics.filter((d) => d.code === 'CTX005')).toHaveLength(0);
   });
 });
+
+describe('Slice 4: Diagnostic Group Consolidation for Repeated CTX003, CTX004, CTX005 & Summary Counts', () => {
+  it('consolidates repeated dead path (CTX004), dead script (CTX005), and child override (CTX003) occurrences into single Diagnostic Groups with merged --fix edits and summary counts', async () => {
+    const cwd = createTempWorkspace({
+      'package.json': JSON.stringify(
+        {
+          name: 'monorepo',
+          scripts: {
+            'test:unit': 'vitest run',
+          },
+        },
+        null,
+        2,
+      ),
+      'packages/auth/src/middleware/auth.ts': 'export const auth = 1;\n',
+      'packages/api/src/router.ts': 'export default function api() {}\n',
+      'packages/web/src/page.tsx': 'export default function Page() {}\n',
+      'CLAUDE.md': [
+        '# Root Rules',
+        '- Never use default exports in TypeScript files.',
+        '- Auth logic lives in `src/middleware/auth.ts`.',
+        '- Run `pnpm run test:unit:watch` locally.',
+      ].join('\n'),
+      'AGENTS.md': [
+        '# Root Agents',
+        '- Verify `src/middleware/auth.ts` before changing sessions.',
+        '- Always run `pnpm run test:unit:watch` in CI.',
+      ].join('\n'),
+      'packages/api/AGENTS.md': [
+        '# API Rules',
+        '- Must use default exports in route handlers.',
+        '- Import `src/middleware/auth.ts` for auth checks.',
+      ].join('\n'),
+      'packages/web/AGENTS.md': [
+        '# Web Rules',
+        '- Must use default exports in Next.js pages.',
+      ].join('\n'),
+    });
+
+    const beforeFix = await analyzeWorkspace({ cwd });
+
+    // 1. CTX004: `src/middleware/auth.ts` is referenced in 3 files -> consolidated into 1 Diagnostic Group with rawOccurrenceCount = 3
+    const ctx004 = beforeFix.diagnostics.filter((d) => d.code === 'CTX004');
+    expect(ctx004).toHaveLength(1);
+    expect(ctx004[0].rawOccurrenceCount).toBe(3);
+    expect(ctx004[0].secondaryLocations).toHaveLength(2);
+    expect(ctx004[0].fix?.edits).toHaveLength(3);
+
+    // 2. CTX005: `pnpm run test:unit:watch` is referenced in 2 files -> consolidated into 1 Diagnostic Group with rawOccurrenceCount = 2
+    const ctx005 = beforeFix.diagnostics.filter((d) => d.code === 'CTX005');
+    expect(ctx005).toHaveLength(1);
+    expect(ctx005[0].rawOccurrenceCount).toBe(2);
+    expect(ctx005[0].secondaryLocations).toHaveLength(1);
+    expect(ctx005[0].fix?.edits).toHaveLength(2);
+
+    // 3. CTX003: `CLAUDE.md` default-export rule is overridden by both packages/api/AGENTS.md and packages/web/AGENTS.md -> 1 Diagnostic Group with rawOccurrenceCount = 2
+    const ctx003 = beforeFix.diagnostics.filter((d) => d.code === 'CTX003');
+    expect(ctx003).toHaveLength(1);
+    expect(ctx003[0].rawOccurrenceCount).toBe(2);
+    expect(ctx003[0].secondaryLocations).toHaveLength(2);
+    expect(ctx003[0].fix).toBeDefined();
+
+    // 4. Verify WorkspaceAnalysisResult.summary distinguishes Grouped Issues vs Raw Occurrences
+    expect(beforeFix.summary).toBeDefined();
+    expect(beforeFix.summary?.groupedErrorCount).toBe(2); // 1 CTX004 group + 1 CTX005 group
+    expect(beforeFix.summary?.rawErrorCount).toBe(5); // 3 CTX004 occurrences + 2 CTX005 occurrences
+    expect(beforeFix.summary?.groupedWarningCount).toBe(1); // 1 CTX003 group
+    expect(beforeFix.summary?.rawWarningCount).toBe(2); // 2 CTX003 child overrides
+    expect(beforeFix.summary?.fixableCount).toBe(3);
+
+    // 5. Running `deontic check --fix` heals all 3 groups (all 7 raw occurrences) in a single pass!
+    const cliFix = await runCli(['check', '--fix'], { cwd });
+    expect(cliFix.exitCode).toBe(0);
+
+    const afterFix = await analyzeWorkspace({ cwd });
+    expect(afterFix.diagnostics).toHaveLength(0);
+    expect(afterFix.summary?.groupedErrorCount).toBe(0);
+    expect(afterFix.summary?.rawErrorCount).toBe(0);
+  });
+});
+

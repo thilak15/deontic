@@ -301,4 +301,114 @@ paths:
     const finalCheck = await analyzeWorkspace({ cwd: e2eCwd });
     expect(finalCheck.diagnostics).toEqual([]);
   });
+
+  it('Ticket #14: folds warning groups (>3 per rule) and secondary locations (>5 per group) in default pretty mode, expands with --verbose, and prints the End-of-Run Summary Table', async () => {
+    const cwd = createTempWorkspace();
+
+    // Create a nested checkout boundary so excludedCheckouts is non-empty
+    fs.mkdirSync(path.join(cwd, 'vendor', 'sub-repo', '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, 'vendor', 'sub-repo', 'CLAUDE.md'),
+      '# Ignored sub-repo\n- Check `missing/subrepo.ts`.\n',
+      'utf8',
+    );
+
+    // Create package.json so `pnpm test` is valid and `pnpm tset` is a fixable typo (CTX005)
+    fs.writeFileSync(
+      path.join(cwd, 'package.json'),
+      JSON.stringify({ name: 'test-pkg', scripts: { test: 'vitest run' } }, null, 2),
+      'utf8',
+    );
+    fs.mkdirSync(path.join(cwd, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'src', 'index.ts'), 'export const x = 1;\n', 'utf8');
+
+    // Create >5 duplicate occurrences of one dead path (to test >5 secondary locations truncation)
+    // plus a fixable CTX005 dead script, plus >3 distinct CTX008 warning groups
+    fs.writeFileSync(
+      path.join(cwd, 'CLAUDE.md'),
+      [
+        '# Main Rules',
+        '- Always use pnpm for package management.',
+        '- Never use default exports in TypeScript modules.',
+        '- Always use Vitest for unit testing.',
+        '- Always use Prisma for database queries.',
+        '- Run `pnpm tset` before committing.',
+        '- Check `src/dead-target.ts` in step 1.',
+        '- Check `src/dead-target.ts` in step 2.',
+        '- Check `src/dead-target.ts` in step 3.',
+        '- Check `src/dead-target.ts` in step 4.',
+        '- Check `src/dead-target.ts` in step 5.',
+        '- Check `src/dead-target.ts` in step 6.',
+        '- Check `src/dead-target.ts` in step 7.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    fs.mkdirSync(path.join(cwd, '.claude', 'rules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, '.claude', 'rules', 'dup.md'),
+      [
+        '# Duplicate Rules',
+        '- Always use pnpm for package management.',
+        '- Never use default exports in TypeScript modules.',
+        '- Always use Vitest for unit testing.',
+        '- Always use Prisma for database queries.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    // 1. Default `deontic check` (--format pretty)
+    const defaultRes = await runCli(['check'], { cwd });
+    expect(defaultRes.exitCode).toBe(1);
+
+    // Primary location renders code frame (`-->`), secondary locations render compact `:::` pointers
+    expect(defaultRes.stdout).toContain('--> CLAUDE.md:');
+    expect(defaultRes.stdout).toContain('::: CLAUDE.md:');
+
+    // >5 secondary locations on `src/dead-target.ts` (7 total = 1 primary + 6 secondary -> 5 shown, 1 hidden)
+    expect(defaultRes.stdout).toContain('... and 1 more location(s); pass --verbose to expand');
+
+    // >3 CTX008 warning groups (4 total -> 3 shown, 1 hidden)
+    expect(defaultRes.stdout).toMatch(
+      /\.\.\. and 1 more CTX008 warning group\(s\) \[\d+ occurrences?\] hidden; pass --verbose to expand/,
+    );
+
+    // Structured End-of-Run Summary Table
+    expect(defaultRes.stdout).toContain('Summary');
+    expect(defaultRes.stdout).toContain('CTX004');
+    expect(defaultRes.stdout).toContain('CTX005');
+    expect(defaultRes.stdout).toContain('CTX008');
+    expect(defaultRes.stdout).toContain('Grouped Issues');
+    expect(defaultRes.stdout).toContain('Raw Occurrences');
+    expect(defaultRes.stdout).toContain('vendor/sub-repo');
+    expect(defaultRes.stdout).toContain('--fix');
+    expect(defaultRes.stdout).toMatch(/Checked 2 harness file\(s\): 2 error\(s\), 4 warning\(s\)/);
+
+    // 2. `deontic check --verbose` expands all warning groups and all secondary locations
+    const verboseRes = await runCli(['check', '--verbose'], { cwd });
+    expect(verboseRes.exitCode).toBe(1);
+    expect(verboseRes.stdout).not.toContain('more location(s); pass --verbose to expand');
+    expect(verboseRes.stdout).not.toContain('warning group(s)');
+    expect(verboseRes.stdout).toContain('CLAUDE.md:13:');
+
+    // 3. Machine-readable formats remain completely unfolded and include full summary & locations
+    const jsonRes = await runCli(['check', '--format', 'json'], { cwd });
+    const parsedJson = JSON.parse(jsonRes.stdout);
+    expect(parsedJson.summary.groupedErrorCount).toBe(2);
+    expect(parsedJson.summary.rawErrorCount).toBe(8);
+    expect(parsedJson.summary.groupedWarningCount).toBe(4);
+    expect(parsedJson.summary.excludedCheckouts).toEqual(['vendor/sub-repo']);
+    const jsonCtx004 = parsedJson.diagnostics.find((d: { code: string }) => d.code === 'CTX004');
+    expect(jsonCtx004.secondaryLocations).toHaveLength(6);
+
+    const sarifRes = await runCli(['check', '--format', 'sarif'], { cwd });
+    const parsedSarif = JSON.parse(sarifRes.stdout);
+    expect(parsedSarif.runs[0].results).toHaveLength(6); // 2 errors + 4 warnings unfolded
+    expect(parsedSarif.runs[0].properties.summary.rawErrorCount).toBe(8);
+
+    const ghRes = await runCli(['check', '--format', 'github'], { cwd });
+    expect(ghRes.stdout).toContain('::error file=CLAUDE.md,line=7,col=10,title=CTX004::');
+    expect(ghRes.stdout).toContain('::error file=CLAUDE.md,line=13,col=10,title=CTX004::');
+    expect(ghRes.stdout).toContain('::notice title=deontic-summary::grouped=2 error(s), 4 warning(s); raw=8 error(s), 4 warning(s)');
+  });
 });

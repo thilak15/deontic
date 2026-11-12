@@ -484,6 +484,39 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
     if (hf.format === 'mcp-config' || hf.format === 'claude-settings') {
       continue;
     }
+    if (
+      ctx.options.agent &&
+      hf.agentProfiles.length > 0 &&
+      !hf.agentProfiles.includes(ctx.options.agent)
+    ) {
+      continue;
+    }
+
+    const isLineSuppressed = (line: number, code: 'CTX004' | 'CTX005'): boolean => {
+      if (hf.suppressedCodes.includes(code)) return true;
+      if (
+        hf.directives.some(
+          (d) => line >= d.lineStart && line <= d.lineEnd && d.suppressedCodes.includes(code),
+        )
+      ) {
+        return true;
+      }
+      if (
+        hf.contextNotes.some(
+          (n) => line >= n.lineStart && line <= n.lineEnd && n.suppressedCodes.includes(code),
+        )
+      ) {
+        return true;
+      }
+      if (
+        hf.sections.some(
+          (s) => line >= s.lineStart && line <= s.lineEnd && s.suppressedCodes.includes(code),
+        )
+      ) {
+        return true;
+      }
+      return false;
+    };
 
     const lines = hf.rawContent.split(/\r?\n/);
     const checkedPathsInFile = new Set<string>();
@@ -525,6 +558,9 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
         if (!cleanedRef) continue;
 
         const loc = findLineAndColumnOfToken(hf, cleanedRef, stmt.lineStart, stmt.lineEnd);
+        if (isLineSuppressed(loc.lineStart, 'CTX004')) {
+          continue;
+        }
         const lineText = lines[loc.lineStart - 1] ?? stmt.rawText;
 
         // Guard 1: Negation / Deprecation Guard
@@ -636,6 +672,7 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
             : `Remove or update the stale path '${cleanedRef}'.`,
           help: helpText,
           fix,
+          metadata: { groupKey: `CTX004::${normRef}` },
         });
       }
 
@@ -646,6 +683,9 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
         if (!parsedCmd) continue;
 
         const loc = findLineAndColumnOfToken(hf, rawCmd, stmt.lineStart, stmt.lineEnd);
+        if (isLineSuppressed(loc.lineStart, 'CTX005')) {
+          continue;
+        }
         const lineText = lines[loc.lineStart - 1] ?? stmt.rawText;
         if (DEPRECATION_LINE_REGEX.test(lineText)) continue;
 
@@ -691,6 +731,7 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
                     ],
                   }
                 : undefined,
+            metadata: { groupKey: `CTX005::package-script::${parsedCmd.scriptName}` },
           });
         } else if (parsedCmd.kind === 'make-target') {
           if (!manifests.hasMakefile) continue;
@@ -730,11 +771,69 @@ export function runGroundTruthPass(ctx: WorkspaceContext): Diagnostic[] {
                     ],
                   }
                 : undefined,
+            metadata: { groupKey: `CTX005::make-target::${parsedCmd.scriptName}` },
           });
         }
       }
     }
   }
 
-  return diagnostics;
+  return consolidateGroundTruthGroups(diagnostics);
+}
+
+function consolidateGroundTruthGroups(rawDiagnostics: Diagnostic[]): Diagnostic[] {
+  const groups = new Map<string, Diagnostic[]>();
+  for (const diag of rawDiagnostics) {
+    const key =
+      typeof diag.metadata?.groupKey === 'string'
+        ? diag.metadata.groupKey
+        : `${diag.code}::${diag.primaryLocation.file}:${diag.primaryLocation.lineStart}:${diag.message}`;
+    const list = groups.get(key) ?? [];
+    list.push(diag);
+    groups.set(key, list);
+  }
+
+  const consolidated: Diagnostic[] = [];
+  for (const items of groups.values()) {
+    const first = items[0];
+    if (items.length === 1) {
+      consolidated.push({
+        ...first,
+        rawOccurrenceCount: 1,
+      });
+      continue;
+    }
+
+    const secondaryLocations: DiagnosticLocation[] = items
+      .slice(1)
+      .map((item) => item.primaryLocation);
+
+    const seenEdits = new Set<string>();
+    const mergedEdits = [];
+    for (const item of items) {
+      for (const edit of item.fix?.edits ?? []) {
+        const editKey = `${edit.file}:${edit.lineStart ?? 0}:${edit.oldText ?? ''}->${edit.newText}`;
+        if (!seenEdits.has(editKey)) {
+          seenEdits.add(editKey);
+          mergedEdits.push(edit);
+        }
+      }
+    }
+
+    consolidated.push({
+      ...first,
+      message: `${first.message} (${items.length} occurrences)`,
+      secondaryLocations,
+      rawOccurrenceCount: items.length,
+      fix:
+        mergedEdits.length > 0 && first.fix
+          ? {
+              description: `${first.fix.description} (${mergedEdits.length} location(s))`,
+              edits: mergedEdits,
+            }
+          : first.fix,
+    });
+  }
+
+  return consolidated;
 }

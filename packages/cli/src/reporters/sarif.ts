@@ -136,6 +136,10 @@ export function formatSarif(result: WorkspaceAnalysisResult): string {
             },
           },
           results: sarifResults,
+          properties: {
+            summary: result.summary,
+            excludedCheckouts: result.excludedCheckouts,
+          },
         },
       ],
     },

@@ -10,6 +10,7 @@ export interface CheckCommandOptions {
   agent?: AgentProfileId;
   strict?: boolean;
   fix?: boolean;
+  verbose?: boolean;
   probe?: boolean;
   traceDir?: string;
 }
@@ -59,7 +60,7 @@ export async function runCheckCommand(options: CheckCommandOptions): Promise<{
       break;
     case 'pretty':
     default:
-      stdout = formatPretty(result);
+      stdout = formatPretty(result, { verbose: options.verbose });
       break;
   }
 

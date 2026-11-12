@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import picomatch from 'picomatch';
@@ -9,6 +10,7 @@ export interface DiscoveredWorkspaceFiles {
   harnessFiles: HarnessFile[];
   repoFiles: string[];
   gitignorePatterns: string[];
+  excludedCheckouts: string[];
 }
 
 const ALWAYS_SKIP_DIRS = new Set(['.git', 'node_modules', '.worktrees']);
@@ -21,6 +23,46 @@ const ALLOWED_HIDDEN_FILES = new Set([
   '.windsurfrules',
   '.gitignore',
 ]);
+
+function resolveRealPath(targetPath: string): string {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
+  }
+}
+
+function detectNestedGitWorktrees(cwd: string): string[] {
+  const realCwd = resolveRealPath(cwd);
+
+  let output: string;
+  try {
+    output = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: realCwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return [];
+  }
+
+  const nested: string[] = [];
+  for (const rawLine of output.split(/\r?\n/)) {
+    if (!rawLine.startsWith('worktree ')) continue;
+    const rawWtPath = rawLine.slice('worktree '.length).trim();
+    if (!rawWtPath) continue;
+
+    const realWtPath = resolveRealPath(rawWtPath);
+    if (realWtPath === realCwd) continue;
+    if (realWtPath.startsWith(realCwd + path.sep)) {
+      const rel = toPosixPath(path.relative(realCwd, realWtPath));
+      if (rel && !rel.startsWith('..')) {
+        nested.push(rel);
+      }
+    }
+  }
+  return nested;
+}
 
 export function parseGitignoreToGlobs(gitignoreContent: string): string[] {
   const globs: string[] = [];
@@ -86,6 +128,7 @@ export function discoverWorkspaceFiles(cwd: string, config: ResolvedDeonticConfi
 
   const harnessFiles: HarnessFile[] = [];
   const repoFiles: string[] = [];
+  const excludedCheckoutsSet = new Set<string>(detectNestedGitWorktrees(cwd));
 
   function walk(currentDir: string): void {
     let entries: fs.Dirent[];
@@ -102,6 +145,11 @@ export function discoverWorkspaceFiles(cwd: string, config: ResolvedDeonticConfi
       const relPath = toPosixPath(path.relative(cwd, fullPath));
 
       if (entry.isDirectory()) {
+        if (excludedCheckoutsSet.has(relPath)) continue;
+        if (fs.existsSync(path.join(fullPath, '.git'))) {
+          excludedCheckoutsSet.add(relPath);
+          continue;
+        }
         if (ALWAYS_SKIP_DIRS.has(entry.name)) continue;
         if (entry.name.startsWith('.') && !ALLOWED_HIDDEN_DIRS.has(entry.name)) {
           continue;
@@ -143,10 +191,12 @@ export function discoverWorkspaceFiles(cwd: string, config: ResolvedDeonticConfi
 
   harnessFiles.sort((a, b) => a.path.localeCompare(b.path));
   repoFiles.sort((a, b) => a.localeCompare(b));
+  const excludedCheckouts = Array.from(excludedCheckoutsSet).sort((a, b) => a.localeCompare(b));
 
   return {
     harnessFiles,
     repoFiles,
     gitignorePatterns,
+    excludedCheckouts,
   };
 }

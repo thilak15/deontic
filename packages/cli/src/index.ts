@@ -43,6 +43,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
   const agent = getFlagValue('--agent') as AgentProfileId | undefined;
   const strict = hasFlag('--strict');
   const fix = hasFlag('--fix');
+  const verbose = hasFlag('--verbose');
   const write = hasFlag('--write');
   const check = hasFlag('--check');
   const probe = hasFlag('--probe');
@@ -52,7 +53,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
 
   switch (subcommand) {
     case 'check':
-      return runCheckCommand({ cwd, format, agent, strict, fix, probe, traceDir });
+      return runCheckCommand({ cwd, format, agent, strict, fix, verbose, probe, traceDir });
     case 'cost':
       return runCostCommand({ cwd, format: format === 'json' ? 'json' : 'pretty', probe });
     case 'trace':
@@ -72,7 +73,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
   }
 }
 
-export { formatPretty } from './reporters/pretty.js';
+export { formatPretty, type PrettyFormatOptions } from './reporters/pretty.js';
 export { formatJson } from './reporters/json.js';
 export { formatSarif } from './reporters/sarif.js';
 export { formatGithub } from './reporters/github.js';

@@ -1,0 +1,4 @@
+# Checkout Boundary Isolation and Equivalence-Class Diagnostic Grouping
+
+We isolate workspace discovery to the single checkout containing `cwd` by detecting nested `Checkout Boundary` directories via `git worktree list --porcelain` and child `.git` metadata (directories or gitlink files) rather than hardcoded path exclusions like `tmp/`, and we consolidate pairwise analyzer findings (`CTX001`, `CTX003`, `CTX004`, `CTX005`, `CTX008`) into equivalence-class `Diagnostic Group`s while tracking both grouped issue counts and raw occurrence counts. Auditing across nested worktrees or clones causes root `**/*` Harness Files to intersect with every nested checkout copy and multiplies duplicate/conflict warnings quadratically ($\binom{k}{2}$), whereas boundary detection and equivalence-class grouping keep each checkout's audit self-contained and human-scannable without hiding legitimate non-checkout files in `tmp/`.
+

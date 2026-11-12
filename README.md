@@ -21,7 +21,6 @@ Deterministic static analyzer, Turn-0 context budget profiler, progressive-discl
 - [Inline Pragmas and Markers](#inline-pragmas-and-markers)
 - [Programmatic API (`@deontic/core`)](#programmatic-api-deonticcore)
 - [GitHub Action](#github-action)
-- [Repository Architecture](#repository-architecture)
 - [Development](#development)
 - [License](#license)
 
@@ -477,54 +476,6 @@ jobs:
 | `strict` | `'false'` | Fail the workflow step on warnings as well as errors (`true` or `false`). |
 | `format` | `'github'` | Output reporter format (`github`, `sarif`, `json`, `pretty`). |
 | `working-directory` | `'.'` | Repository directory to analyze. |
-
----
-
-## Repository Architecture
-
-This repository is a TypeScript ESM monorepo managed with `pnpm` workspaces:
-
-```text
-deontic/
-├── packages/
-│   ├── core/                        # @deontic/core: Parser, ontology solver, passes, splitter, syncer
-│   │   ├── src/
-│   │   │   ├── config/              # deontic.json and package.json#deontic loader
-│   │   │   ├── discovery/           # Gitignore-aware Harness File and workspace walker
-│   │   │   ├── scope/               # Agent Profile resolution and Two-Tier Witness Glob Intersection
-│   │   │   ├── parser/              # Unified/Remark Markdown AST, YAML frontmatter, pragmas, Directives
-│   │   │   ├── analyzer/
-│   │   │   │   ├── ontology.ts      # Pure-TypeScript domain ontology & finite-domain constraint solver
-│   │   │   │   ├── 00-imports.ts    # CTX006: @import existence and cycle detection
-│   │   │   │   ├── 01-contradiction.ts # CTX001 & CTX003: Same-scope & ancestor override contradictions
-│   │   │   │   ├── 02-ground-truth.ts  # CTX004 & CTX005: Dead file, script, and Makefile references
-│   │   │   │   ├── 03-bloat-cliff.ts   # CTX002: Turn-0 byte/directive caps & Derivable Directory Trees
-│   │   │   │   ├── 04-mcp-schema.ts    # CTX007: MCP fingerprint registry, live probe, casing collisions
-│   │   │   │   ├── 05-redundancy.ts    # CTX008: Semantic and Jaccard near-duplicate Directives
-│   │   │   │   └── 06-trace-roi.ts     # CTX009: Session JSONL correlation and Dead Rule Sections
-│   │   │   └── autofix/
-│   │   │       ├── index.ts         # Deterministic in-place text edit applier
-│   │   │       ├── path-splitter.ts # Progressive-disclosure scope inference and file splitter
-│   │   │       └── cross-sync.ts    # Bidirectional Claude <-> Cursor <-> AGENTS.md synchronizer
-│   │   └── test/                    # Vitest unit and property-based test suites
-│   ├── cli/                         # @deontic/cli: Command-line interface and reporters
-│   │   └── src/
-│   │       ├── commands/            # check, cost, split, sync, trace, mcp-probe
-│   │       └── reporters/           # pretty, json, sarif, github
-│   └── action/                      # GitHub Action wrapper (action.yml + entrypoint)
-├── docs/
-│   ├── adr/                         # Architecture Decision Records (ADR-0001 through ADR-0004)
-│   └── agents/                      # Repository agent documentation
-├── GLOSSARY.md                      # Canonical Ubiquitous Language definitions
-└── AGENTS.md                        # Repository agent instructions
-```
-
-### Architecture Decision Records (ADRs)
-
-- **ADR-0001**: [Pure-TypeScript Ontology and Finite-Domain Solver over Z3 WASM](docs/adr/0001-ontology-constraint-solver-over-z3-wasm.md)
-- **ADR-0002**: [Unified Contradiction Scope with Per-Agent Context Budgets](docs/adr/0002-unified-contradiction-scope-per-agent-budgets.md)
-- **ADR-0003**: [Two-Tier Witness-Based Glob Intersection](docs/adr/0003-two-tier-witness-glob-intersection.md)
-- **ADR-0004**: [Static MCP Fingerprint Registry by Default with Opt-In Live Probe](docs/adr/0004-static-mcp-fingerprint-registry-default.md)
 
 ---
 

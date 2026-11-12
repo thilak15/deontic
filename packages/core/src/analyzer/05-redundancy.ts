@@ -82,6 +82,87 @@ function makeLocation(d: DirectiveNode, label?: string): DiagnosticLocation {
   };
 }
 
+type SectionWorkflowContext =
+  | 'summary'
+  | 'testing'
+  | 'release_pr'
+  | 'database'
+  | 'frontend'
+  | 'backend_api'
+  | 'general';
+
+function classifySectionContext(heading?: string): SectionWorkflowContext {
+  if (!heading) return 'general';
+  const lower = heading.toLowerCase();
+  if (
+    /\b(?:overview|summary|tl;?dr|quick\s*(?:start|reference|ref)|cheat\s*sheet|at\s+a\s+glance|introduction|intro)\b/.test(
+      lower,
+    )
+  ) {
+    return 'summary';
+  }
+  if (
+    /\b(?:pr|pull\s*request|review|release|deploy(?:ment)?|ci|cd|pipeline|commit|pre-commit|git|merge|publish|checklist|ship(?:ping)?)\b/.test(
+      lower,
+    )
+  ) {
+    return 'release_pr';
+  }
+  if (
+    /\b(?:test(?:ing|s)?|vitest|jest|playwright|cypress|e2e|unit|integration|spec|qa|verification)\b/.test(
+      lower,
+    )
+  ) {
+    return 'testing';
+  }
+  if (/\b(?:db|database|prisma|drizzle|sql|postgres|migration|schema)\b/.test(lower)) {
+    return 'database';
+  }
+  if (/\b(?:ui|frontend|react|next\.?js|tailwind|css|component|styling)\b/.test(lower)) {
+    return 'frontend';
+  }
+  if (/\b(?:api|backend|server|router|endpoint|trpc|graphql|webhook|auth)\b/.test(lower)) {
+    return 'backend_api';
+  }
+  return 'general';
+}
+
+function isOnDemandSkillFile(file: HarnessFile): boolean {
+  return file.format === 'claude-skill' && !file.isAlwaysLoadedAtRoot;
+}
+
+function normalizeSetKey(items: string[]): string {
+  return [...items]
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join('|');
+}
+
+function compareCanonicalPriority(
+  dA: DirectiveNode,
+  dB: DirectiveNode,
+  fileMap: Map<string, HarnessFile>,
+): number {
+  const fileA = fileMap.get(dA.sourceFile);
+  const fileB = fileMap.get(dB.sourceFile);
+  const aRoot = Boolean(fileA?.isAlwaysLoadedAtRoot) && !dA.sourceFile.startsWith('.');
+  const bRoot = Boolean(fileB?.isAlwaysLoadedAtRoot) && !dB.sourceFile.startsWith('.');
+  if (aRoot !== bRoot) return aRoot ? -1 : 1;
+
+  const aAlways = Boolean(fileA?.isAlwaysLoadedAtRoot);
+  const bAlways = Boolean(fileB?.isAlwaysLoadedAtRoot);
+  if (aAlways !== bAlways) return aAlways ? -1 : 1;
+
+  const aDot = dA.sourceFile.startsWith('.');
+  const bDot = dB.sourceFile.startsWith('.');
+  if (aDot !== bDot) return aDot ? 1 : -1;
+
+  const fileCmp = dA.sourceFile.localeCompare(dB.sourceFile);
+  if (fileCmp !== 0) return fileCmp;
+  return dA.lineStart - dB.lineStart;
+}
+
 export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const fileMap = new Map<string, HarnessFile>(ctx.harnessFiles.map((f) => [f.path, f]));
@@ -95,12 +176,30 @@ export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
 
   const allDirectives: DirectiveNode[] = [];
   for (const hf of ctx.harnessFiles) {
+    if (hf.suppressedCodes.includes('CTX008')) continue;
+    if (
+      ctx.options.agent &&
+      hf.agentProfiles.length > 0 &&
+      !hf.agentProfiles.includes(ctx.options.agent)
+    ) {
+      continue;
+    }
     for (const d of hf.directives) {
+      if (d.suppressedCodes.includes('CTX008')) continue;
+      const sec = sectionMap.get(d.sectionId);
+      if (sec?.suppressedCodes.includes('CTX008')) continue;
       allDirectives.push(d);
     }
   }
 
-  const seenLinePairs = new Set<string>();
+  interface DuplicateEdge {
+    idxA: number;
+    idxB: number;
+    witnessPath: string;
+  }
+
+  const edgesByProfile = new Map<AgentProfileId, DuplicateEdge[]>();
+  const seenProfileLinePairs = new Set<string>();
 
   for (let i = 0; i < allDirectives.length; i++) {
     for (let j = i + 1; j < allDirectives.length; j++) {
@@ -114,6 +213,11 @@ export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
       const fileA = fileMap.get(dA.sourceFile);
       const fileB = fileMap.get(dB.sourceFile);
       if (!fileA || !fileB) continue;
+
+      // Exempt on-demand SKILL.md files from cross-file redundancy checks
+      if (dA.sourceFile !== dB.sourceFile && (isOnDemandSkillFile(fileA) || isOnDemandSkillFile(fileB))) {
+        continue;
+      }
 
       // Skip sections managed by `deontic:sync` markers
       const secA = sectionMap.get(dA.sectionId);
@@ -134,6 +238,20 @@ export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
         continue;
       }
 
+      // Same-file cross-section context check: exempt intentional repetition across distinct workflow/domain sections
+      if (dA.sourceFile === dB.sourceFile && dA.sectionId !== dB.sectionId) {
+        const condA = dA.predicate.condition ?? '';
+        const condB = dB.predicate.condition ?? '';
+        if (condA !== condB) {
+          continue;
+        }
+        const ctxA = classifySectionContext(secA?.heading);
+        const ctxB = classifySectionContext(secB?.heading);
+        if (ctxA !== ctxB) {
+          continue;
+        }
+      }
+
       const witnessPath = findWitnessIntersection(
         dA.effectiveGlobs,
         dB.effectiveGlobs,
@@ -141,25 +259,33 @@ export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
       );
       if (!witnessPath) continue;
 
+      const cmdsA = normalizeSetKey(dA.referencedCommands);
+      const cmdsB = normalizeSetKey(dB.referencedCommands);
+      const pathsA = normalizeSetKey(dA.referencedPaths);
+      const pathsB = normalizeSetKey(dB.referencedPaths);
+      const commandsAndPathsCompatible = cmdsA === cmdsB && pathsA === pathsB;
+
       const assertionsA = extractCanonicalAssertions(dA);
       const assertionsB = extractCanonicalAssertions(dB);
 
       let isSemanticDuplicate = false;
-      for (const a of assertionsA) {
-        for (const b of assertionsB) {
-          if (
-            a.topic !== 'general' &&
-            a.topic === b.topic &&
-            a.action === b.action &&
-            a.target === b.target &&
-            a.polarity === b.polarity &&
-            areConditionsCompatible(a.condition, b.condition)
-          ) {
-            isSemanticDuplicate = true;
-            break;
+      if (commandsAndPathsCompatible) {
+        for (const a of assertionsA) {
+          for (const b of assertionsB) {
+            if (
+              a.topic !== 'general' &&
+              a.topic === b.topic &&
+              a.action === b.action &&
+              a.target === b.target &&
+              a.polarity === b.polarity &&
+              areConditionsCompatible(a.condition, b.condition)
+            ) {
+              isSemanticDuplicate = true;
+              break;
+            }
           }
+          if (isSemanticDuplicate) break;
         }
-        if (isSemanticDuplicate) break;
       }
 
       let isTextualNearDuplicate = false;
@@ -178,27 +304,104 @@ export function runRedundancyPass(ctx: WorkspaceContext): Diagnostic[] {
         continue;
       }
 
-      const lineKey = `${dA.sourceFile}:${dA.lineStart}::${dB.sourceFile}:${dB.lineStart}`;
-      if (seenLinePairs.has(lineKey)) continue;
-      seenLinePairs.add(lineKey);
+      const profile = sharedProfiles[0];
+      const lineKey = `${profile}::${dA.sourceFile}:${dA.lineStart}::${dB.sourceFile}:${dB.lineStart}`;
+      if (seenProfileLinePairs.has(lineKey)) continue;
+      seenProfileLinePairs.add(lineKey);
 
-      // Prefer keeping the root file (e.g. CLAUDE.md / AGENTS.md) as the original and flagging the secondary/rule file as redundant
-      const [orig, dup] =
-        !fileA.isAlwaysLoadedAtRoot && fileB.isAlwaysLoadedAtRoot
-          ? [dB, dA]
-          : dA.sourceFile.startsWith('.') && !dB.sourceFile.startsWith('.')
-            ? [dB, dA]
-            : [dA, dB];
+      const list = edgesByProfile.get(profile) ?? [];
+      list.push({ idxA: i, idxB: j, witnessPath });
+      edgesByProfile.set(profile, list);
+    }
+  }
+
+  // Consolidate connected components of duplicate Directives per Agent Profile into single Diagnostic Groups
+  for (const [profile, edges] of edgesByProfile.entries()) {
+    if (ctx.options.agent && profile !== ctx.options.agent) {
+      continue;
+    }
+    const parent = new Map<number, number>();
+    const find = (x: number): number => {
+      let root = parent.get(x) ?? x;
+      if (root !== x) {
+        root = find(root);
+        parent.set(x, root);
+      } else if (!parent.has(x)) {
+        parent.set(x, x);
+      }
+      return root;
+    };
+    const union = (a: number, b: number): void => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent.set(rb, ra);
+    };
+
+    for (const edge of edges) {
+      union(edge.idxA, edge.idxB);
+    }
+
+    const diagnosticGroups = new Map<
+      number,
+      { memberIndices: Set<number>; rawPairCount: number; witnessPath: string }
+    >();
+    for (const edge of edges) {
+      const root = find(edge.idxA);
+      const existing = diagnosticGroups.get(root);
+      if (existing) {
+        existing.memberIndices.add(edge.idxA);
+        existing.memberIndices.add(edge.idxB);
+        existing.rawPairCount += 1;
+      } else {
+        diagnosticGroups.set(root, {
+          memberIndices: new Set([edge.idxA, edge.idxB]),
+          rawPairCount: 1,
+          witnessPath: edge.witnessPath,
+        });
+      }
+    }
+
+    for (const group of diagnosticGroups.values()) {
+      // Deduplicate Directives that live on the same file:line within the Diagnostic Group
+      const byFileLine = new Map<string, DirectiveNode>();
+      for (const idx of group.memberIndices) {
+        const d = allDirectives[idx];
+        const key = `${d.sourceFile}:${d.lineStart}`;
+        if (!byFileLine.has(key)) {
+          byFileLine.set(key, d);
+        }
+      }
+      const members = Array.from(byFileLine.values()).sort((a, b) =>
+        compareCanonicalPriority(a, b, fileMap),
+      );
+      if (members.length < 2) continue;
+
+      const orig = members[0];
+      const duplicates = members.slice(1);
+      const primaryDup = duplicates[0];
+      const extraDups = duplicates.slice(1);
+
+      const secondaryLocations: DiagnosticLocation[] = [
+        makeLocation(orig, 'Original directive'),
+        ...extraDups.map((d) => makeLocation(d, 'Redundant / duplicate directive')),
+      ];
+
+      const extraSuffix =
+        extraDups.length > 0 ? ` (and ${extraDups.length} other location(s))` : '';
 
       diagnostics.push({
         code: 'CTX008',
         severity: 'warning',
-        agentProfile: sharedProfiles[0],
-        message: `Redundant Directive within Agent Profile '${sharedProfiles[0]}': ${dup.sourceFile}:${dup.lineStart} duplicates ${orig.sourceFile}:${orig.lineStart}`,
-        primaryLocation: makeLocation(dup, 'Redundant / duplicate directive'),
-        secondaryLocations: [makeLocation(orig, 'Original directive')],
-        witnessPath,
-        suggestion: `Remove the duplicate directive in ${dup.sourceFile}:${dup.lineStart} to save Turn-0 tokens and instruction slots.`,
+        agentProfile: profile,
+        message: `Redundant Directive within Agent Profile '${profile}': ${primaryDup.sourceFile}:${primaryDup.lineStart} duplicates ${orig.sourceFile}:${orig.lineStart}${extraSuffix}`,
+        primaryLocation: makeLocation(primaryDup, 'Redundant / duplicate directive'),
+        secondaryLocations,
+        rawOccurrenceCount: group.rawPairCount,
+        witnessPath: group.witnessPath,
+        suggestion:
+          extraDups.length > 0
+            ? `Remove the ${duplicates.length} duplicate directives (${duplicates.map((d) => `${d.sourceFile}:${d.lineStart}`).join(', ')}) to save Turn-0 tokens and instruction slots.`
+            : `Remove the duplicate directive in ${primaryDup.sourceFile}:${primaryDup.lineStart} to save Turn-0 tokens and instruction slots.`,
       });
     }
   }
