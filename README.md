@@ -85,6 +85,8 @@ Deontic uses a strict domain vocabulary (defined in `GLOSSARY.md`):
 - **Turn-0 Load**: The baseline tokens, Directives, and tool schemas injected into an agent's context window at session start before any repository file is opened.
 - **Witness Path**: A concrete repository file path (or synthesized candidate path when no matching file exists yet) that falls within the Effective Scopes of two conflicting Directives, proving their scopes overlap.
 - **Session Hit Rate**: The percentage of recorded local agent sessions in which the agent touches at least one file or runs at least one command matching a Rule Section's scope.
+- **Checkout Boundary**: A subdirectory containing its own `.git` directory or `.git` worktree/submodule pointer file, or a path registered in `git worktree list`, treated as an independent repository checkout and excluded from the parent checkout's scan.
+- **Diagnostic Group**: A single consolidated finding representing an equivalence class of repeated or pairwise diagnostics across locations (`primaryLocation`, `secondaryLocations`, and `rawOccurrenceCount`).
 
 ---
 
@@ -101,7 +103,7 @@ Deontic executes seven static analysis passes (`00-imports` through `06-trace-ro
 | `CTX005` | `error` | **Dead Script Reference** | A `pnpm`/`npm`/`yarn`/`bun` script or `Makefile` target referenced in a Harness File does not exist in `package.json` or `Makefile`. **Supports `--fix`** when a unique close script match is identified via prefix or Levenshtein edit distance. |
 | `CTX006` | `error` | **Broken or Circular `@import`** | An `@path/to/file` include directive points to a non-existent file or forms a circular include cycle across files. |
 | `CTX007` | `warning` | **MCP Schema Overload & Casing Collision** | Active MCP tools for an Agent Profile exceed `maxMcpTools` (default 40), a single MCP tool schema exceeds 800 tokens, or active MCP servers exhibit a Parameter Casing Collision (for example, `repo_name` vs. `repoName`). |
-| `CTX008` | `warning` | **Redundant Directive** | Two Directives within the same Agent Profile have overlapping Effective Scopes and are either semantic duplicates in the ontology or textual near-duplicates (Jaccard token similarity >= 0.75). |
+| `CTX008` | `warning` | **Redundant Directive** | Two or more Directives within the same Agent Profile have overlapping Effective Scopes and are either semantic duplicates or textual near-duplicates (Jaccard token similarity >= 0.75), excluding on-demand `SKILL.md` files and distinct workflow/domain sections in the same file. Consolidated into one Diagnostic Group per duplicate component. |
 | `CTX009` | `warning` | **Dead Rule Section** | A domain-specific Rule Section loaded unconditionally at repository root (`Turn-0 Load`) has a 0% Session Hit Rate across >= 5 recorded agent sessions. |
 
 ---
@@ -157,10 +159,11 @@ deontic check [options]
 **Options:**
 
 - `--format <pretty|json|sarif|github>`: Output reporter format (default: `pretty`).
-  - `pretty`: Human-readable terminal report with file locations, line/column spans, Witness Paths, and remediation suggestions.
-  - `json`: Complete structured `WorkspaceAnalysisResult` JSON payload.
+  - `pretty`: Human-readable terminal report with primary code frames (`-->`), compact secondary location pointers (`:::`, capped at 5 per group by default), folded warning groups (capped at 3 per rule code by default), and an End-of-Run Summary Table (Grouped Issues vs. Raw Occurrences, auto-fixable counts, and excluded Checkout Boundaries).
+  - `json`: Complete structured `WorkspaceAnalysisResult` JSON payload (including `summary` and `excludedCheckouts`).
   - `sarif`: SARIF 2.1.0 JSON report suitable for GitHub Code Scanning.
-  - `github`: GitHub Actions workflow annotations (`::error file=...,line=...::...` and `::warning ...`).
+  - `github`: GitHub Actions workflow annotations (`::error`, `::warning`, and `::notice title=deontic-summary`).
+- `--verbose`: Expand all folded warning Diagnostic Groups and all secondary location pointers in `--format pretty`.
 - `--agent <claude-code|cursor|codex|copilot>`: Filter diagnostics to a single Agent Profile.
 - `--strict`: Exit with code `1` on warnings as well as errors (by default, only `error`-severity diagnostics cause a non-zero exit code).
 - `--fix`: Automatically apply safe, deterministic fixes on disk (`CTX003` ancestor scope exclusions, `CTX004` renamed file references, `CTX005` closest script names) and re-verify the workspace.
@@ -170,8 +173,11 @@ deontic check [options]
 **Examples:**
 
 ```bash
-# Run standard check with terminal output
+# Run standard check with folded terminal output and summary table
 deontic check
+
+# Expand all folded warning groups and secondary locations
+deontic check --verbose
 
 # Check only Claude Code harness files and fail on warnings
 deontic check --agent claude-code --strict
@@ -409,7 +415,7 @@ const analysis = await analyzeWorkspace({
   agent: 'claude-code',
   fix: false,
 });
-console.log(analysis.diagnostics);
+console.log(analysis.diagnostics, analysis.summary, analysis.excludedCheckouts);
 
 // 2. Profile Turn-0 Load and MCP token budgets
 const costReport = await profileWorkspaceCost({
